@@ -11,7 +11,7 @@ import i18n from '@renderer/i18n'
 import { currentSpan } from '@renderer/services/SpanManagerService'
 import store from '@renderer/store'
 import { hubMCPServer } from '@renderer/store/mcp'
-import type { Assistant, MCPServer, MCPTool, Model, Provider } from '@renderer/types'
+import type { Assistant, MCPServer, MCPTool, Model, Provider, WebTraceContext } from '@renderer/types'
 import { type FetchChatCompletionParams, getEffectiveMcpMode, isSystemProvider } from '@renderer/types'
 import type { StreamTextParams } from '@renderer/types/aiCoreTypes'
 import { type Chunk, ChunkType } from '@renderer/types/chunk'
@@ -106,7 +106,7 @@ export async function fetchAllActiveServerTools(): Promise<MCPTool[]> {
   }
 }
 
-export async function fetchMcpTools(assistant: Assistant) {
+export async function fetchMcpTools(assistant: Assistant, traceContext?: WebTraceContext) {
   let mcpTools: MCPTool[] = []
   const enabledMCPs = getMcpServersForAssistant(assistant)
 
@@ -115,9 +115,9 @@ export async function fetchMcpTools(assistant: Assistant) {
       const toolPromises = enabledMCPs.map(async (mcpServer: MCPServer) => {
         try {
           const span = currentSpan(
-            assistant.traceContext?.topicId || '',
-            assistant.traceContext?.modelName,
-            assistant.traceContext?.assistantMsgId
+            traceContext?.topicId || '',
+            traceContext?.modelName,
+            traceContext?.assistantMsgId
           )
           const tools = await window.api.mcp.listTools(mcpServer, span?.spanContext())
           return tools.filter((tool: any) => !mcpServer.disabledTools?.includes(tool.name))
@@ -156,10 +156,11 @@ export async function transformMessagesAndFetch(
       timeout?: number
       headers?: Record<string, string>
     }
+    traceContext?: WebTraceContext
   },
   onChunkReceived: (chunk: Chunk) => void
 ) {
-  const { messages, assistant } = request
+  const { messages, assistant, traceContext } = request
 
   try {
     const { modelMessages, uiMessages } = await ConversationService.prepareMessagesForModel(messages, assistant)
@@ -173,7 +174,8 @@ export async function transformMessagesAndFetch(
       assistant,
       assistantMsgId: request.assistantMsgId,
       blockManager: request.blockManager,
-      setCitationBlockId: request.callbacks.setCitationBlockId!
+      setCitationBlockId: request.callbacks.setCitationBlockId!,
+      traceContext
     })
 
     await fetchChatCompletion({
@@ -181,7 +183,8 @@ export async function transformMessagesAndFetch(
       assistant: assistant,
       requestOptions: request.options,
       uiMessages,
-      onChunkReceived
+      onChunkReceived,
+      traceContext
     })
   } catch (error: any) {
     onChunkReceived({ type: ChunkType.ERROR, error })
@@ -194,13 +197,14 @@ export async function fetchChatCompletion({
   assistant,
   requestOptions,
   onChunkReceived,
-  uiMessages
+  uiMessages,
+  traceContext
 }: FetchChatCompletionParams) {
   logger.info('fetchChatCompletion called with detailed context', {
     messageCount: messages?.length || 0,
     prompt: prompt,
     assistantId: assistant.id,
-    traceContext: assistant.traceContext,
+    traceContext: traceContext,
     modelId: assistant.model?.id,
     modelName: assistant.model?.name
   })
@@ -221,7 +225,7 @@ export async function fetchChatCompletion({
   onChunkReceived({ type: ChunkType.LLM_RESPONSE_CREATED })
 
   if (isPromptToolUse(assistant) || isSupportedToolUse(assistant)) {
-    mcpTools.push(...(await fetchMcpTools(assistant)))
+    mcpTools.push(...(await fetchMcpTools(assistant, traceContext)))
   }
   if (prompt) {
     messages = [
@@ -241,7 +245,8 @@ export async function fetchChatCompletion({
   } = await buildStreamTextParams(messages, assistant, provider, {
     mcpTools: mcpTools,
     webSearchProviderId: assistant.webSearchProviderId,
-    requestOptions
+    requestOptions,
+    traceContext
   })
 
   // Safely fallback to prompt tool use when function calling is not supported by model.
@@ -272,7 +277,8 @@ export async function fetchChatCompletion({
     ...middlewareConfig,
     assistant,
     callType: 'chat',
-    uiMessages
+    uiMessages,
+    traceContext
   })
 }
 

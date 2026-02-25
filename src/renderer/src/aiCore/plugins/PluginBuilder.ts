@@ -3,6 +3,7 @@ import { createPromptToolUsePlugin, webSearchPlugin } from '@cherrystudio/ai-cor
 import { loggerService } from '@logger'
 import { getEnableDeveloperMode } from '@renderer/hooks/useSettings'
 import type { Assistant } from '@renderer/types'
+import type { WebTraceContext } from '@renderer/types/trace'
 
 import type { AiSdkMiddlewareConfig } from '../middleware/AiSdkMiddlewareBuilder'
 import { searchOrchestrationPlugin } from './searchOrchestrationPlugin'
@@ -12,15 +13,19 @@ const logger = loggerService.withContext('PluginBuilder')
 /**
  * 根据条件构建插件数组
  */
-export function buildPlugins(middlewareConfig: AiSdkMiddlewareConfig & { assistant: Assistant }): AiPlugin[] {
+export function buildPlugins(
+  middlewareConfig: AiSdkMiddlewareConfig & { assistant: Assistant },
+  traceContext?: WebTraceContext
+): AiPlugin[] {
   const plugins: AiPlugin[] = []
 
-  if (middlewareConfig.assistant.traceContext?.topicId && getEnableDeveloperMode()) {
+  if (traceContext?.topicId && getEnableDeveloperMode()) {
     // 0. 添加 telemetry 插件
     plugins.push(
       createTelemetryPlugin({
         enabled: true,
-        assistant: middlewareConfig.assistant
+        assistant: middlewareConfig.assistant,
+        traceContext
       })
     )
   }
@@ -31,7 +36,7 @@ export function buildPlugins(middlewareConfig: AiSdkMiddlewareConfig & { assista
   }
   // 2. 支持工具调用时添加搜索插件
   if (middlewareConfig.isSupportedToolUse || middlewareConfig.isPromptToolUse) {
-    plugins.push(searchOrchestrationPlugin(middlewareConfig.assistant))
+    plugins.push(searchOrchestrationPlugin(middlewareConfig.assistant, traceContext))
   }
 
   // 3. 推理模型时添加推理插件

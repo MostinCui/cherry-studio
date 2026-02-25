@@ -2,6 +2,7 @@ import type { Assistant, MCPTool } from '@renderer/types'
 import type { Chunk } from '@renderer/types/chunk'
 import type { Message } from '@renderer/types/newMessage'
 import type { SdkRawChunk, SdkRawOutput } from '@renderer/types/sdk'
+import type { WebTraceContext } from '@renderer/types/trace'
 import type { LanguageModelUsage } from 'ai'
 
 import type { ProcessingState } from './types'
@@ -33,6 +34,8 @@ export interface CompletionsParams {
 
   assistant: Assistant // 助手为基本单位
   // model: Model
+
+  traceContext?: WebTraceContext
 
   onChunk?: (chunk: Chunk) => void
   onResponse?: (text: string, isComplete: boolean) => void

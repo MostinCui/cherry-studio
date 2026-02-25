@@ -87,6 +87,7 @@ export async function buildStreamTextParams(
       timeout?: number
       headers?: Record<string, string>
     }
+    traceContext?: WebTraceContext
   }
 ): Promise<{
   params: StreamTextParams
@@ -131,7 +132,7 @@ export async function buildStreamTextParams(
 
   const enableGenerateImage = !!(isGenerateImageModel(model) && assistant.enableGenerateImage)
 
-  let tools = setupToolsConfig(mcpTools, assistant.traceContext)
+  let tools = setupToolsConfig(mcpTools, options.traceContext)
 
   // 构建真正的 providerOptions
   const webSearchConfig: CherryWebSearchConfig = {
@@ -278,7 +279,6 @@ export async function buildGenerateTextParams(
   options: {
     mcpTools?: MCPTool[]
     enableTools?: boolean
-    traceContext?: WebTraceContext
   } = {}
 ): Promise<any> {
   // 复用流式参数的构建逻辑

@@ -16,14 +16,11 @@
   }
 }
 
-header {
-  text-align: center;
-}
-
 .header {
   height: 40px;
   display: flex;
   align-items: center;
+  text-align: center;
   justify-content: space-between;
   background: var(--trace-header);
   user-select: none;

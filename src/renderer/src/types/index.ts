@@ -61,7 +61,6 @@ export type Assistant = {
   // for translate. 更好的做法是定义base assistant，把 Assistant 作为多种不同定义 assistant 的联合类型，但重构代价太大
   content?: string
   targetLanguage?: TranslateLanguage
-  traceContext?: WebTraceContext
 }
 
 /**
@@ -1192,6 +1191,7 @@ type BaseParams = {
   requestOptions?: FetchChatCompletionRequestOptions
   onChunkReceived: (chunk: Chunk) => void
   uiMessages?: Message[]
+  traceContext?: WebTraceContext
 }
 
 type MessagesParams = BaseParams & {

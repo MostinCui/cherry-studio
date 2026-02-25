@@ -15,6 +15,7 @@ import { addSpan, endSpan } from '@renderer/services/SpanManagerService'
 import type { StartSpanParams } from '@renderer/trace/types/ModelSpanEntity'
 import { type Assistant, type GenerateImageParams, type Model, type Provider, SystemProviderIds } from '@renderer/types'
 import type { AiSdkModel, StreamTextParams } from '@renderer/types/aiCoreTypes'
+import type { WebTraceContext } from '@renderer/types/trace'
 import { SUPPORTED_IMAGE_ENDPOINT_LIST } from '@renderer/utils'
 import { buildClaudeCodeSystemModelMessage } from '@shared/anthropic'
 import { gateway, type ImageModel, type LanguageModel, type Provider as AiSdkProvider, wrapLanguageModel } from 'ai'
@@ -40,6 +41,7 @@ const logger = loggerService.withContext('ModernAiProvider')
 export type ModernAiProviderConfig = AiSdkMiddlewareConfig & {
   assistant: Assistant
   callType: string
+  traceContext?: WebTraceContext
 }
 
 export default class ModernAiProvider {
@@ -174,7 +176,7 @@ export default class ModernAiProvider {
       params.messages = [...claudeCodeSystemMessage, ...(params.messages || [])]
     }
 
-    if (providerConfig.assistant.traceContext?.topicId && getEnableDeveloperMode()) {
+    if (providerConfig.traceContext?.topicId && getEnableDeveloperMode()) {
       return await this._completionsForTrace(model, params, providerConfig)
     } else {
       return await this._completionsOrImageGeneration(model, params, providerConfig)
@@ -224,15 +226,15 @@ export default class ModernAiProvider {
     const traceParams: StartSpanParams = {
       name: traceName,
       tag: 'LLM',
-      topicId: config.assistant.traceContext?.topicId || '',
-      assistantMsgId: config.assistant.traceContext?.assistantMsgId,
+      topicId: config.traceContext?.topicId || '',
+      assistantMsgId: config.traceContext?.assistantMsgId,
       modelName: config.assistant.model?.name, // 使用modelId而不是provider名称
       inputs: params
     }
 
     logger.info('Starting AI SDK trace span', {
       traceName,
-      topicId: config.assistant.traceContext?.topicId,
+      topicId: config.traceContext?.topicId,
       modelId,
       hasTools: !!params.tools && Object.keys(params.tools).length > 0,
       toolNames: params.tools ? Object.keys(params.tools) : [],
@@ -242,7 +244,7 @@ export default class ModernAiProvider {
     const span = addSpan(traceParams)
     if (!span) {
       logger.warn('Failed to create span, falling back to regular completions', {
-        topicId: config.assistant.traceContext?.topicId,
+        topicId: config.traceContext?.topicId,
         modelId,
         traceName
       })
@@ -253,7 +255,7 @@ export default class ModernAiProvider {
       logger.info('Created parent span, now calling completions', {
         spanId: span.spanContext().spanId,
         traceId: span.spanContext().traceId,
-        topicId: config.assistant.traceContext?.topicId,
+        topicId: config.traceContext?.topicId,
         modelId,
         parentSpanCreated: true
       })
@@ -263,15 +265,15 @@ export default class ModernAiProvider {
       logger.info('Completions finished, ending parent span', {
         spanId: span.spanContext().spanId,
         traceId: span.spanContext().traceId,
-        topicId: config.assistant.traceContext?.topicId,
+        topicId: config.traceContext?.topicId,
         modelId,
         resultLength: result.getText().length
       })
 
       // 标记span完成
       endSpan({
-        topicId: config.assistant.traceContext?.topicId || '',
-        assistantMsgId: config.assistant.traceContext?.assistantMsgId,
+        topicId: config.traceContext?.topicId || '',
+        assistantMsgId: config.traceContext?.assistantMsgId,
         outputs: result.getText(),
         span,
         modelName: modelId // 使用modelId保持一致性
@@ -282,14 +284,14 @@ export default class ModernAiProvider {
       logger.error('Error in completionsForTrace, ending parent span with error', error as Error, {
         spanId: span.spanContext().spanId,
         traceId: span.spanContext().traceId,
-        topicId: config.assistant.traceContext?.topicId,
+        topicId: config.traceContext?.topicId,
         modelId
       })
 
       // 标记span出错
       endSpan({
-        topicId: config.assistant.traceContext?.topicId || '',
-        assistantMsgId: config.assistant.traceContext?.assistantMsgId,
+        topicId: config.traceContext?.topicId || '',
+        assistantMsgId: config.traceContext?.assistantMsgId,
         error: error as Error,
         span,
         modelName: modelId // 使用modelId保持一致性
@@ -317,7 +319,7 @@ export default class ModernAiProvider {
     // })
 
     // 根据条件构建插件数组
-    const plugins = buildPlugins(config)
+    const plugins = buildPlugins(config, config.traceContext)
 
     // 用构建好的插件数组创建executor
     const executor = createExecutor(this.config!.providerId, this.config!.options, plugins)

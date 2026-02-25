@@ -13,6 +13,7 @@ import { configManager } from './ConfigManager'
 const logger = loggerService.withContext('SpanCacheService')
 
 class SpanCacheService implements TraceCache {
+  // traceId ---> topic
   private topicMap: Map<string, string> = new Map<string, string>()
   private cache: Map<string, SpanEntity> = new Map<string, SpanEntity>()
   private fileDir: string
@@ -52,7 +53,6 @@ class SpanCacheService implements TraceCache {
 
   clear: () => void = () => {
     this.cache.clear()
-    this.topicMap.clear()
   }
 
   async cleanTopic(topicId: string, traceId?: string, modelName?: string) {
@@ -64,6 +64,7 @@ class SpanCacheService implements TraceCache {
     if (modelName) {
       this.cleanHistoryTrace(topicId, traceId || '', modelName)
       this.saveSpans(topicId)
+      this.topicMap.delete(traceId || '')
     } else if (traceId) {
       fs.rm(path.join(this.fileDir, topicId, traceId))
     } else {
@@ -104,7 +105,6 @@ class SpanCacheService implements TraceCache {
     }
     const spans = Array.from(this.cache.values().filter((e) => e.traceId === traceId || !e.modelName))
     await this._saveToFile(spans, traceId, topicId)
-    this.topicMap.delete(traceId)
     this._cleanCache(traceId)
   }
 
@@ -286,6 +286,7 @@ class SpanCacheService implements TraceCache {
         return span && span.traceId === traceId && (!modelName || span.modelName === modelName)
       })
       .forEach((span) => this.cache.delete(span.id))
+    this.topicMap.delete(traceId)
   }
 
   private _updateParentOutputs(spanId: string, modelName: string, context: string) {
@@ -344,6 +345,7 @@ class SpanCacheService implements TraceCache {
       })
 
     await Promise.all(writeOperations)
+
   }
 
   private async _getHisData(topicId: string, traceId: string, modelName?: string, assistantMsgId?: string) {
@@ -377,10 +379,13 @@ class SpanCacheService implements TraceCache {
         }
       }
 
-      return Array.from(parseLines(chunks.join('')))
-        .filter((span) => span.topicId === topicId && span.traceId === traceId && span.modelName)
-        .filter((span) => !modelName || span.modelName === modelName)
-        .filter((span) => !assistantMsgId || !span.referenceId || span.referenceId === assistantMsgId)
+      return (
+        Array.from(parseLines(chunks.join('')))
+          .filter((span) => span.topicId === topicId && span.traceId === traceId && span.modelName)
+          // 兼容历史数据 新数据可以通过 assistantMsgId 判断，可以不用modelName
+          .filter((span) => !modelName || span.modelName === modelName)
+          .filter((span) => !assistantMsgId || !span.referenceId || span.referenceId === assistantMsgId)
+      )
     } catch (err) {
       logger.error('Error parsing JSON:', err as Error)
       throw err

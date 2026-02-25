@@ -25,6 +25,7 @@ export interface TelemetryPluginConfig {
   recordInputs?: boolean
   recordOutputs?: boolean
   assistant: Assistant
+  traceContext?: WebTraceContext
 }
 
 /**
@@ -33,22 +34,24 @@ export interface TelemetryPluginConfig {
 class AdapterTracer {
   private originalTracer: Tracer
   private traceContext?: WebTraceContext
+  // ai-sdk生成的根节点，其他节点都作为根节点的
   private parentSpanContext?: SpanContext
-  private cachedSpanContext: SpanContext[] = []
+  // 使用ai-sdk的根节点，来自外部
+  private rootSpanContext?: SpanContext
   private spanEntity: ModelSpanEntity | undefined
 
   constructor(originalTracer: Tracer, traceContext?: WebTraceContext, parentSpanContext?: SpanContext) {
     this.originalTracer = originalTracer
     this.traceContext = traceContext
-    this.parentSpanContext = parentSpanContext
+    this.rootSpanContext = parentSpanContext
     if (traceContext) {
       this.spanEntity = currentEntity(traceContext.topicId, traceContext.modelName, traceContext.assistantMsgId)
     }
 
     logger.debug('AdapterTracer created with parent context info', {
       ...traceContext,
-      parentTraceId: this.parentSpanContext?.traceId,
-      parentSpanId: this.parentSpanContext?.spanId,
+      parentTraceId: this.rootSpanContext?.traceId,
+      parentSpanId: this.rootSpanContext?.spanId,
       hasOriginalTracer: !!originalTracer
     })
   }
@@ -71,14 +74,16 @@ class AdapterTracer {
         if (this.parentSpanContext) {
           passedSpan.setAttribute('trace.parentSpanId', this.parentSpanContext.spanId)
           passedSpan.setAttribute('trace.parentTraceId', this.parentSpanContext.traceId)
-          this.cachedSpanContext.push(this.parentSpanContext)
+        } else if (this.rootSpanContext) {
+          passedSpan.setAttribute('trace.parentSpanId', this.rootSpanContext.spanId)
+          passedSpan.setAttribute('trace.parentTraceId', this.rootSpanContext.traceId)
+          this.parentSpanContext = passedSpan.spanContext()
         }
         if (this.traceContext?.topicId) {
           passedSpan.setAttribute('trace.topicId', this.traceContext.topicId)
         }
 
         this.spanEntity?.addSpan(passedSpan)
-        this.parentSpanContext = span.spanContext()
         // 包装span的end方法
         const originalEnd = span.end.bind(span)
         span.end = (endTime?: any) => {
@@ -90,7 +95,9 @@ class AdapterTracer {
             ...this.traceContext
           })
 
-          this.parentSpanContext = this.cachedSpanContext.length > 0 ? this.cachedSpanContext.pop() : undefined
+          if (this.parentSpanContext && this.parentSpanContext.spanId === span.spanContext().spanId) {
+            this.parentSpanContext = undefined
+          }
 
           // 调用原始 end 方法
           originalEnd(endTime)
@@ -139,13 +146,14 @@ class AdapterTracer {
 
     // 创建包含父 SpanContext 的上下文（如果有的话）
     const createContextWithParent = () => {
-      if (this.parentSpanContext) {
+      const parentContext = this.parentSpanContext || this.rootSpanContext
+      if (parentContext) {
         try {
-          const ctx = trace.setSpanContext(otelContext.active(), this.parentSpanContext)
+          const ctx = trace.setSpanContext(otelContext.active(), parentContext)
           logger.debug('Created active context with parent SpanContext for startActiveSpan', {
             spanName: name,
-            parentTraceId: this.parentSpanContext?.traceId,
-            parentSpanId: this.parentSpanContext?.spanId,
+            parentTraceId: parentContext?.traceId,
+            parentSpanId: parentContext?.spanId,
             topicId: this.traceContext?.topicId
           })
           return ctx
@@ -159,26 +167,17 @@ class AdapterTracer {
     // 根据参数数量确定调用方式，注入包含mainTraceId的上下文
     if (typeof arg2 === 'function') {
       return this.originalTracer.startActiveSpan(name, {}, createContextWithParent(), (span: Span) => {
-        logger.info('startSpan ', span['name'])
-        const ret = wrapFunction(arg2, span)(span)
-        logger.info('endSpan ', span['name'])
-        return ret
+        return wrapFunction(arg2, span)(span)
       })
     } else if (typeof arg3 === 'function') {
       return this.originalTracer.startActiveSpan(name, arg2, createContextWithParent(), (span: Span) => {
-        logger.info('startSpan ', span['name'])
-        const ret = wrapFunction(arg3, span)(span)
-        logger.info('endSpan ', span['name'])
-        return ret
+        return wrapFunction(arg3, span)(span)
       })
     } else if (typeof arg4 === 'function') {
       // 如果调用方提供了 context，则保留以维护嵌套关系；否则回退到父上下文
       const ctx = arg3 ?? createContextWithParent()
       return this.originalTracer.startActiveSpan(name, arg2, ctx, (span: Span) => {
-        logger.info('startSpan ', span['name'])
-        const ret = wrapFunction(arg4, span)(span)
-        logger.info('endSpan ', span['name'])
-        return ret
+        return wrapFunction(arg4, span)(span)
       })
     } else {
       throw new Error('Invalid arguments for startActiveSpan')
@@ -187,9 +186,7 @@ class AdapterTracer {
 }
 
 export function createTelemetryPlugin(config: TelemetryPluginConfig) {
-  const { enabled = true, recordInputs = true, recordOutputs = true, assistant } = config
-
-  const traceContext = assistant.traceContext
+  const { enabled = true, recordInputs = true, recordOutputs = true, traceContext } = config
 
   // 获取共享的 tracer
   const originalTracer = webTraceService.getTracer()

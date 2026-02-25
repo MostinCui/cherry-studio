@@ -18,6 +18,7 @@ import { getDefaultModel, getProviderByModel } from '@renderer/services/Assistan
 import store from '@renderer/store'
 import { selectCurrentUserId, selectGlobalMemoryEnabled, selectMemoryConfig } from '@renderer/store/memory'
 import type { Assistant } from '@renderer/types'
+import type { WebTraceContext } from '@renderer/types/trace'
 import type { ExtractResults } from '@renderer/utils/extract'
 import { extractInfoFromXML } from '@renderer/utils/extract'
 import type { LanguageModel, ModelMessage } from 'ai'
@@ -79,9 +80,10 @@ async function analyzeSearchIntent(
     shouldMemorySearch?: boolean
     lastAnswer?: ModelMessage
     context: AiRequestContext
+    traceContext?: WebTraceContext
   }
 ): Promise<ExtractResults | undefined> {
-  const { shouldWebSearch = false, shouldKnowledgeSearch = false, lastAnswer, context } = options
+  const { shouldWebSearch = false, shouldKnowledgeSearch = false, lastAnswer, context, traceContext } = options
 
   if (!lastUserMessage) return undefined
 
@@ -124,7 +126,7 @@ async function analyzeSearchIntent(
   try {
     logger.info('Starting intent analysis generateText call', {
       modelId: model.id,
-      traceContext: assistant.traceContext,
+      traceContext: traceContext,
       requestId: context.requestId,
       hasWebSearch: needWebExtract,
       hasKnowledgeSearch: needKnowledgeExtract
@@ -136,7 +138,7 @@ async function analyzeSearchIntent(
     }).finally(() => {
       logger.info('Intent analysis generateText call completed', {
         modelId: model.id,
-        traceContext: assistant.traceContext,
+        traceContext: traceContext,
         requestId: context.requestId
       })
     })
@@ -235,7 +237,7 @@ async function storeConversationMemory(
 /**
  * 🎯 搜索编排插件
  */
-export const searchOrchestrationPlugin = (assistant: Assistant) => {
+export const searchOrchestrationPlugin = (assistant: Assistant, traceContext?: WebTraceContext) => {
   // 存储意图分析结果
   const intentAnalysisResults: { [requestId: string]: ExtractResults } = {}
   const userMessages: { [requestId: string]: ModelMessage } = {}
@@ -278,7 +280,8 @@ export const searchOrchestrationPlugin = (assistant: Assistant) => {
             shouldKnowledgeSearch,
             shouldMemorySearch,
             lastAnswer: lastAssistantMessage,
-            context
+            context,
+            traceContext
           })
 
           if (analysisResult) {
@@ -321,7 +324,7 @@ export const searchOrchestrationPlugin = (assistant: Assistant) => {
               assistant.webSearchProviderId,
               analysisResult.websearch,
               context.requestId,
-              assistant.traceContext
+              traceContext
             )
           }
         }
@@ -345,7 +348,8 @@ export const searchOrchestrationPlugin = (assistant: Assistant) => {
             params.tools['builtin_knowledge_search'] = knowledgeSearchTool(
               assistant,
               analysisResult.knowledge,
-              getMessageContent(userMessage)
+              getMessageContent(userMessage),
+              traceContext
             )
           }
         }

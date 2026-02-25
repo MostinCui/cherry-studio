@@ -1,6 +1,7 @@
 import { REFERENCE_PROMPT } from '@renderer/config/prompts'
 import { processKnowledgeSearch } from '@renderer/services/KnowledgeService'
 import type { Assistant, KnowledgeReference } from '@renderer/types'
+import type { WebTraceContext } from '@renderer/types/trace'
 import type { ExtractResults, KnowledgeExtractResults } from '@renderer/utils/extract'
 import { type InferToolInput, type InferToolOutput, tool } from 'ai'
 import { isEmpty } from 'lodash'
@@ -12,7 +13,8 @@ import * as z from 'zod'
 export const knowledgeSearchTool = (
   assistant: Assistant,
   extractedKeywords: KnowledgeExtractResults,
-  userMessage?: string
+  userMessage?: string,
+  traceContext?: WebTraceContext
 ) => {
   return tool({
     name: 'builtin_knowledge_search',
@@ -85,7 +87,7 @@ You can use this tool as-is, or provide additionalContext to refine the search f
       }
 
       // 执行知识库搜索
-      const knowledgeReferences = await processKnowledgeSearch(extractResults, knowledgeBaseIds, assistant.traceContext)
+      const knowledgeReferences = await processKnowledgeSearch(extractResults, knowledgeBaseIds, traceContext)
       const knowledgeReferencesData = knowledgeReferences.map((ref: KnowledgeReference) => ({
         id: ref.id,
         content: ref.content,
