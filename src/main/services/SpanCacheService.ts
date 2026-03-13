@@ -15,8 +15,8 @@ const logger = loggerService.withContext('SpanCacheService')
 class SpanCacheService implements TraceCache {
   // traceId ---> topic
   private topicMap: Map<string, string> = new Map<string, string>()
-  private cache: Map<string, SpanEntity> = new Map<string, SpanEntity>()
   private fileDir: string
+  private cache: Map<string, SpanEntity> = new Map<string, SpanEntity>()
 
   constructor() {
     this.fileDir = path.join(os.homedir(), HOME_CHERRY_DIR, 'trace')
@@ -116,6 +116,7 @@ class SpanCacheService implements TraceCache {
         .filter((spanEntity) => {
           return spanEntity.traceId === traceId && spanEntity.modelName
         })
+        // 兼容历史数据 新数据可以通过 assistantMsgId 判断，可以不用modelName
         .filter((spanEntity) => {
           return !modelName || spanEntity.modelName === modelName
         })
@@ -232,6 +233,7 @@ class SpanCacheService implements TraceCache {
   private _updateModelName(entity: SpanEntity) {
     let modelName = entity.modelName || entity.attributes?.modelName?.toString()
     let referenceId = entity.referenceId || entity.attributes?.assistantMsgId?.toString()
+    // 兼容历史数据 新数据可以通过 assistantMsgId 判断，可以不用modelName
     if (!modelName && entity.parentId) {
       modelName = this.cache.get(entity.parentId)?.modelName
     }
@@ -345,7 +347,6 @@ class SpanCacheService implements TraceCache {
       })
 
     await Promise.all(writeOperations)
-
   }
 
   private async _getHisData(topicId: string, traceId: string, modelName?: string, assistantMsgId?: string) {
@@ -379,13 +380,11 @@ class SpanCacheService implements TraceCache {
         }
       }
 
-      return (
-        Array.from(parseLines(chunks.join('')))
+      return Array.from(parseLines(chunks.join('')))
           .filter((span) => span.topicId === topicId && span.traceId === traceId && span.modelName)
           // 兼容历史数据 新数据可以通过 assistantMsgId 判断，可以不用modelName
           .filter((span) => !modelName || span.modelName === modelName)
           .filter((span) => !assistantMsgId || !span.referenceId || span.referenceId === assistantMsgId)
-      )
     } catch (err) {
       logger.error('Error parsing JSON:', err as Error)
       throw err

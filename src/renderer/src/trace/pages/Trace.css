@@ -38,7 +38,7 @@
   align-items: center;
   justify-content: center;
   font-weight: 400;
-  font-size: 12px;
+  font-size: 16px;
   color: var(--trace-text);
   pointer-events: none;
   -webkit-app-region: drag;

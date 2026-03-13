@@ -6,7 +6,8 @@
  * 集成 AiSdkSpanAdapter 将 AI SDK trace 数据转换为现有格式
  */
 
-import { definePlugin } from '@cherrystudio/ai-core'
+import type { AiPlugin } from '@cherrystudio/ai-core'
+import { definePlugin, type StreamTextParams, type StreamTextResult } from '@cherrystudio/ai-core'
 import { loggerService } from '@logger'
 import type { Span, SpanContext, Tracer } from '@opentelemetry/api'
 import { context as otelContext, trace } from '@opentelemetry/api'
@@ -15,6 +16,7 @@ import { webTraceService } from '@renderer/services/WebTraceService'
 import type { ModelSpanEntity } from '@renderer/trace/types/ModelSpanEntity'
 import type { Assistant } from '@renderer/types'
 import type { WebTraceContext } from '@renderer/types/trace'
+import type { TelemetrySettings } from 'ai'
 
 import { AiSdkSpanAdapter } from '../trace/AiSdkSpanAdapter'
 
@@ -54,6 +56,107 @@ class AdapterTracer {
       parentSpanId: this.rootSpanContext?.spanId,
       hasOriginalTracer: !!originalTracer
     })
+  }
+
+  startSpan(name: string, options?: any, context?: any): Span {
+    logger.debug('AdapterTracer.startSpan called', {
+      spanName: name,
+      topicId: this.traceContext?.topicId,
+      modelName: this.traceContext?.modelName
+    })
+
+    // 创建包含父 SpanContext 的上下文（如果有的话）
+    const createContextWithParent = () => {
+      if (this.rootSpanContext) {
+        return this.rootSpanContext
+      }
+      if (this.parentSpanContext) {
+        try {
+          const ctx = trace.setSpanContext(otelContext.active(), this.parentSpanContext)
+          logger.debug('Created active context with parent SpanContext for startSpan', {
+            spanName: name,
+            parentTraceId: this.parentSpanContext.traceId,
+            parentSpanId: this.parentSpanContext.spanId,
+            topicId: this.traceContext?.topicId
+          })
+          return ctx
+        } catch (error) {
+          logger.warn('Failed to create context with parent SpanContext in startSpan', error as Error)
+        }
+      }
+      return otelContext.active()
+    }
+
+    const ctx = context ?? createContextWithParent()
+    const span = this.originalTracer.startSpan(name, options, ctx)
+
+    // 注入父子关系属性（兜底重建层级用）
+    try {
+      if (this.parentSpanContext) {
+        span.setAttribute('trace.parentSpanId', this.parentSpanContext.spanId)
+        span.setAttribute('trace.parentTraceId', this.parentSpanContext.traceId)
+      }
+      if (this.traceContext?.topicId) {
+        span.setAttribute('trace.topicId', this.traceContext.topicId)
+      }
+    } catch (e) {
+      logger.debug('Failed to set trace parent attributes in startSpan', e as Error)
+    }
+
+    // 包装span的end方法
+    const originalEnd = span.end.bind(span)
+    span.end = (endTime?: any) => {
+      logger.debug('AI SDK span.end() called in startSpan - about to convert span', {
+        spanName: name,
+        spanId: span.spanContext().spanId,
+        traceId: span.spanContext().traceId,
+        topicId: this.traceContext?.topicId,
+        modelName: this.traceContext?.modelName
+      })
+
+      // 调用原始 end 方法
+      originalEnd(endTime)
+
+      // 转换并保存 span 数据
+      try {
+        logger.debug('Converting AI SDK span to SpanEntity (from startSpan)', {
+          spanName: name,
+          spanId: span.spanContext().spanId,
+          traceId: span.spanContext().traceId,
+          topicId: this.traceContext?.topicId,
+          modelName: this.traceContext?.modelName
+        })
+        logger.silly('span', span)
+        const spanEntity = AiSdkSpanAdapter.convertToSpanEntity({
+          span,
+          topicId: this.traceContext?.topicId,
+          modelName: this.traceContext?.modelName
+        })
+
+        // 保存转换后的数据
+        window.api.trace.saveEntity(spanEntity)
+
+        logger.debug('AI SDK span converted and saved successfully (from startSpan)', {
+          spanName: name,
+          spanId: span.spanContext().spanId,
+          traceId: span.spanContext().traceId,
+          topicId: this.traceContext?.topicId,
+          modelName: this.traceContext?.modelName,
+          hasUsage: !!spanEntity.usage,
+          usage: spanEntity.usage
+        })
+      } catch (error) {
+        logger.error('Failed to convert AI SDK span (from startSpan)', error as Error, {
+          spanName: name,
+          spanId: span.spanContext().spanId,
+          traceId: span.spanContext().traceId,
+          topicId: this.traceContext?.topicId,
+          modelName: this.traceContext?.modelName
+        })
+      }
+    }
+
+    return span
   }
 
   startActiveSpan<F extends (span: Span) => any>(name: string, fn: F): ReturnType<F>
@@ -185,13 +288,13 @@ class AdapterTracer {
   }
 }
 
-export function createTelemetryPlugin(config: TelemetryPluginConfig) {
+export function createTelemetryPlugin(config: TelemetryPluginConfig): AiPlugin<StreamTextParams, StreamTextResult> {
   const { enabled = true, recordInputs = true, recordOutputs = true, traceContext } = config
 
   // 获取共享的 tracer
   const originalTracer = webTraceService.getTracer()
 
-  return definePlugin({
+  return definePlugin<StreamTextParams, StreamTextResult>({
     name: 'telemetryPlugin',
     enforce: 'pre', // 在其他插件之前执行，确保 telemetry 配置被正确注入
 
@@ -206,6 +309,7 @@ export function createTelemetryPlugin(config: TelemetryPluginConfig) {
       }
 
       // 获取当前活跃的 span，确保 AI SDK spans 与手动 spans 在同一个 trace 中
+      let parentSpan: Span | undefined = undefined
       let parentSpanContext: SpanContext | undefined = undefined
 
       // 只有在有topicId时才尝试查找父span
@@ -220,7 +324,11 @@ export function createTelemetryPlugin(config: TelemetryPluginConfig) {
             providerId: context.providerId
           })
 
-          const parentSpan = currentSpan(traceContext.topicId, traceContext.modelName, traceContext.assistantMsgId)
+          parentSpan = currentSpan(
+            traceContext.topicId,
+            traceContext.modelName,
+            traceContext.assistantMsgId
+          )
           if (parentSpan) {
             // 直接使用父 span 的 SpanContext，避免手动拼装字段遗漏
             parentSpanContext = parentSpan.spanContext()
@@ -267,20 +375,42 @@ export function createTelemetryPlugin(config: TelemetryPluginConfig) {
         isEnabled: true,
         recordInputs,
         recordOutputs,
-        tracer: adapterTracer, // 使用包装后的 tracer
+        tracer: adapterTracer,
         functionId: `ai-request-${context.requestId}`,
         metadata: {
           providerId: context.providerId,
           modelId: context.modelId,
-          topicId: traceContext?.topicId,
+          topicId: traceContext?.topicId || '',
           requestId: context.requestId,
-          modelName: traceContext?.modelName,
+          modelName: traceContext?.modelName || '',
           // 确保topicId也作为标准属性传递
-          'trace.topicId': traceContext?.topicId,
-          'trace.modelName': traceContext?.modelName,
-          // 添加父span信息用于调试
-          parentSpanId: parentSpanContext?.spanId,
-          parentTraceId: parentSpanContext?.traceId
+          'trace.topicId': traceContext?.topicId || '',
+          'trace.modelName': traceContext?.modelName || '',
+          // 添加父span信息用于调试（只在有值时添加）
+          ...(parentSpanContext?.spanId && { parentSpanId: parentSpanContext.spanId }),
+          ...(parentSpanContext?.traceId && { parentTraceId: parentSpanContext.traceId })
+        }
+      } satisfies TelemetrySettings
+
+      // 如果有父span，尝试在telemetry配置中设置父上下文
+      if (parentSpan) {
+        try {
+          // 设置活跃上下文，确保 AI SDK spans 在正确的 trace 上下文中创建
+          const activeContext = trace.setSpan(otelContext.active(), parentSpan)
+
+          // 更新全局上下文
+          otelContext.with(activeContext, () => {
+            logger.debug('Updated active context with parent span')
+          })
+
+          logger.debug('Set parent context for AI SDK spans', {
+            parentSpanId: parentSpanContext?.spanId,
+            parentTraceId: parentSpanContext?.traceId,
+            hasActiveContext: !!activeContext,
+            hasParentSpan: !!parentSpan
+          })
+        } catch (error) {
+          logger.warn('Failed to set parent context in telemetry config', error as Error)
         }
       }
 

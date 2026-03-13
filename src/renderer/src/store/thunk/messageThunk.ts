@@ -28,8 +28,20 @@ import { addSpan, endSpan } from '@renderer/services/SpanManagerService'
 import { createStreamProcessor, type StreamProcessorCallbacks } from '@renderer/services/StreamProcessingService'
 import store from '@renderer/store'
 import { updateTopicUpdatedAt } from '@renderer/store/assistants'
-import { type ApiServerConfig, type Assistant, type FileMetadata, type Model, type Topic, type WebTraceContext } from '@renderer/types'
-import type { AgentSessionEntity, GetAgentSessionResponse } from '@renderer/types/agent'
+import {
+  type ApiServerConfig,
+  type Assistant,
+  type FileMetadata,
+  type Model,
+  type Topic,
+  type WebTraceContext
+} from '@renderer/types'
+import type {
+  AgentEffort,
+  AgentSessionEntity,
+  AgentThinkingConfig,
+  GetAgentSessionResponse
+} from '@renderer/types/agent'
 import { ChunkType } from '@renderer/types/chunk'
 import type { FileMessageBlock, ImageMessageBlock, Message, MessageBlock } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
@@ -83,6 +95,8 @@ type AgentSessionContext = {
   agentId: string
   sessionId: string
   agentSessionId?: string
+  effort?: AgentEffort
+  thinking?: AgentThinkingConfig
 }
 
 const agentSessionRenameLocks = new Set<string>()
@@ -140,7 +154,6 @@ const buildAgentBaseURL = (apiServer: ApiServerConfig) => {
 
 export const renameAgentSessionIfNeeded = async (
   agentSession: AgentSessionContext,
-  assistant: Assistant,
   topicId: string,
   getState: () => RootState
 ): Promise<void> => {
@@ -161,7 +174,7 @@ export const renameAgentSessionIfNeeded = async (
       return
     }
 
-    const { text: summary } = await fetchMessagesSummary({ messages, assistant })
+    const { text: summary } = await fetchMessagesSummary({ messages })
     const summaryText = summary?.trim()
     if (!summaryText) {
       return
@@ -213,7 +226,10 @@ export const renameAgentSessionIfNeeded = async (
         (prev) =>
           prev?.map((sessionItem) =>
             sessionItem.id === updatedSession.id
-              ? ({ ...sessionItem, name: updatedSession.name } as AgentSessionEntity)
+              ? ({
+                  ...sessionItem,
+                  name: updatedSession.name
+                } as AgentSessionEntity)
               : sessionItem
           ) ?? prev,
         {
@@ -348,7 +364,11 @@ const createAgentMessageStream = async (
       Accept: 'text/event-stream',
       'Cache-Control': 'no-cache'
     },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({
+      content,
+      ...(agentSession.effort ? { effort: agentSession.effort } : {}),
+      ...(agentSession.thinking ? { thinking: agentSession.thinking } : {})
+    }),
     signal
   })
 
@@ -403,7 +423,15 @@ const updateExistingMessageAndBlocksInDB = async (
 const blockUpdateThrottlers = new LRUCache<string, ReturnType<typeof throttle>>({
   max: 100,
   ttl: 1000 * 60 * 5,
-  updateAgeOnGet: true
+  updateAgeOnGet: true,
+  dispose: (throttler, id) => {
+    throttler.cancel()
+    const rafId = blockUpdateRafs.get(id)
+    if (rafId) {
+      cancelAnimationFrame(rafId)
+      blockUpdateRafs.delete(id)
+    }
+  }
 })
 
 /**
@@ -413,7 +441,10 @@ const blockUpdateThrottlers = new LRUCache<string, ReturnType<typeof throttle>>(
 const blockUpdateRafs = new LRUCache<string, number>({
   max: 100,
   ttl: 1000 * 60 * 5,
-  updateAgeOnGet: true
+  updateAgeOnGet: true,
+  dispose: (rafId) => {
+    cancelAnimationFrame(rafId)
+  }
 })
 
 /**
@@ -689,7 +720,7 @@ const fetchAndProcessAgentResponseImpl = async (
       await persistAgentSessionId(latestAgentSessionId)
     }
 
-    await renameAgentSessionIfNeeded(agentSession, assistant, topicId, getState)
+    await renameAgentSessionIfNeeded(agentSession, topicId, getState)
   } catch (error: any) {
     logger.error('Error in fetchAndProcessAgentResponseImpl:', error)
     try {
@@ -729,7 +760,10 @@ const dispatchMultiModelResponses = async (
     })
     dispatch(newMessagesActions.addMessage({ topicId, message: assistantMessage }))
     assistantMessageStubs.push(assistantMessage)
-    tasksToQueue.push({ assistantConfig: assistantForThisMention, messageStub: assistantMessage })
+    tasksToQueue.push({
+      assistantConfig: assistantForThisMention,
+      messageStub: assistantMessage
+    })
   }
 
   const topicFromDB = await db.topics.get(topicId)
@@ -782,7 +816,14 @@ const fetchAndProcessAssistantResponseImplWithTrace = async (
 
   addSpan(params)
   try {
-    const result = await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, traceContext)
+    const result = await fetchAndProcessAssistantResponseImpl(
+      dispatch,
+      getState,
+      topicId,
+      assistant,
+      assistantMessage,
+      traceContext
+    )
     endSpan({ ...params, outputs: result })
   } catch (error) {
     endSpan({ ...params, error: error as Error })
@@ -865,16 +906,36 @@ const fetchAndProcessAssistantResponseImpl = async (
     logger.silly('Add Abort Controller', { id: userMessageId })
     addAbortController(userMessageId!, () => abortController.abort())
 
+    // Fetch agent allowed_tools for MCP auto-approval
+    let allowedTools: string[] | undefined
+    const activeAgentId = getState().runtime.chat.activeAgentId
+    const apiServer = getState().settings.apiServer
+    if (activeAgentId && apiServer?.apiKey) {
+      try {
+        const baseURL = buildAgentBaseURL(apiServer)
+        const agentClient = new AgentApiClient({
+          baseURL,
+          headers: {
+            Authorization: `Bearer ${apiServer.apiKey}`
+          }
+        })
+        const agentData = await agentClient.getAgent(activeAgentId)
+        allowedTools = agentData?.allowed_tools
+      } catch {
+        // Agent fetch failed — proceed without allowedTools
+      }
+    }
+
     await transformMessagesAndFetch(
       {
         messages: messagesForContext,
         assistant,
+        allowedTools,
         blockManager,
         assistantMsgId,
         callbacks,
         options: {
           signal: abortController.signal,
-          timeout: 30000,
           headers: defaultAppHeaders()
         },
         traceContext
@@ -927,7 +988,10 @@ export const sendMessage =
       if (activeAgentSession) {
         const derivedSession = findExistingAgentSessionContext(stateBeforeSend, topicId, assistant.id)
         if (derivedSession?.agentSessionId && derivedSession.agentSessionId !== activeAgentSession.agentSessionId) {
-          activeAgentSession = { ...activeAgentSession, agentSessionId: derivedSession.agentSessionId }
+          activeAgentSession = {
+            ...activeAgentSession,
+            agentSessionId: derivedSession.agentSessionId
+          }
         }
       }
       if (activeAgentSession?.agentSessionId && !userMessage.agentSessionId) {
@@ -976,7 +1040,12 @@ export const sendMessage =
             traceId: userMessage.traceId
           })
           await saveMessageAndBlocksToDB(topicId, assistantMessage, [])
-          dispatch(newMessagesActions.addMessage({ topicId, message: assistantMessage }))
+          dispatch(
+            newMessagesActions.addMessage({
+              topicId,
+              message: assistantMessage
+            })
+          )
 
           queue.add(async () => {
             const traceContext = {
@@ -984,7 +1053,7 @@ export const sendMessage =
               modelName: assistant.model?.name,
               assistantMsgId: assistantMessage.id
             }
-            
+
             await fetchAndProcessAssistantResponseImplWithTrace(
               dispatch,
               getState,
@@ -1193,7 +1262,11 @@ export const resendMessageThunk =
 
       // 处理存在相关的助手消息的情况
       const allBlockIdsToDelete: string[] = []
-      const messagesToUpdateInRedux: { topicId: string; messageId: string; updates: Partial<Message> }[] = []
+      const messagesToUpdateInRedux: {
+        topicId: string
+        messageId: string
+        updates: Partial<Message>
+      }[] = []
 
       // 先处理已有的重传
       for (const originalMsg of assistantMessagesToReset) {
@@ -1210,7 +1283,11 @@ export const resendMessageThunk =
 
         resetDataList.push(resetMsg)
         allBlockIdsToDelete.push(...blockIdsToDelete)
-        messagesToUpdateInRedux.push({ topicId, messageId: resetMsg.id, updates: resetMsg })
+        messagesToUpdateInRedux.push({
+          topicId,
+          messageId: resetMsg.id,
+          updates: resetMsg
+        })
       }
 
       // 再处理新的重传（用户消息提及，但是现有助手消息中不存在提及的模型）
@@ -1554,7 +1631,11 @@ export const appendAssistantResponseThunk =
       await saveMessageAndBlocksToDB(topicId, newAssistantMessageStub, [], insertAtIndex)
 
       dispatch(
-        newMessagesActions.insertMessageAtIndex({ topicId, message: newAssistantMessageStub, index: insertAtIndex })
+        newMessagesActions.insertMessageAtIndex({
+          topicId,
+          message: newAssistantMessageStub,
+          index: insertAtIndex
+        })
       )
 
       dispatch(updateMessageAndBlocksThunk(topicId, { id: existingAssistantMessageId, foldSelected: false }, []))
@@ -1719,7 +1800,12 @@ export const cloneMessagesToNewTopicThunk =
       })
 
       // --- Update Redux State ---
-      dispatch(newMessagesActions.messagesReceived({ topicId: newTopic.id, messages: clonedMessages }))
+      dispatch(
+        newMessagesActions.messagesReceived({
+          topicId: newTopic.id,
+          messages: clonedMessages
+        })
+      )
       if (clonedBlocks.length > 0) {
         dispatch(upsertManyBlocks(clonedBlocks))
       }
@@ -1759,7 +1845,13 @@ export const updateMessageAndBlocksThunk =
 
         // Only dispatch message update if there are actual changes beyond the ID
         if (Object.keys(actualMessageChanges).length > 0) {
-          dispatch(newMessagesActions.updateMessage({ topicId, messageId, updates: actualMessageChanges }))
+          dispatch(
+            newMessagesActions.updateMessage({
+              topicId,
+              messageId,
+              updates: actualMessageChanges
+            })
+          )
         }
       }
 
@@ -1802,13 +1894,21 @@ export const removeBlocksThunk =
       const updatedBlockIds = (message.blocks || []).filter((id) => !blockIdsToRemoveSet.has(id))
 
       // 1. Update Redux state
-      dispatch(newMessagesActions.updateMessage({ topicId, messageId, updates: { blocks: updatedBlockIds } }))
+      dispatch(
+        newMessagesActions.updateMessage({
+          topicId,
+          messageId,
+          updates: { blocks: updatedBlockIds }
+        })
+      )
       cleanupMultipleBlocks(dispatch, blockIdsToRemove)
 
       // 2. Update database - different handling for agent vs Dexie topics
       if (isAgentSessionTopicId(topicId)) {
         // For agent topics: dbService.updateMessage routes to AgentMessageDataSource
-        await dbService.updateMessage(topicId, messageId, { blocks: updatedBlockIds })
+        await dbService.updateMessage(topicId, messageId, {
+          blocks: updatedBlockIds
+        })
       } else {
         // For Dexie topics: use transaction for atomicity
         const finalMessagesToSave = selectMessagesForTopic(getState(), topicId)
@@ -1877,7 +1977,10 @@ export const loadTopicMessagesThunk =
 export const getRawTopic = async (topicId: string): Promise<{ id: string; messages: Message[] } | undefined> => {
   try {
     const rawTopic = await dbService.getRawTopic(topicId)
-    logger.silly('Retrieved raw topic via DbService', { topicId, found: !!rawTopic })
+    logger.silly('Retrieved raw topic via DbService', {
+      topicId,
+      found: !!rawTopic
+    })
     return rawTopic
   } catch (error) {
     logger.error('Failed to get raw topic:', { topicId, error })
@@ -1919,7 +2022,10 @@ export const deleteMessageFromDB = async (topicId: string, messageId: string): P
 export const deleteMessagesFromDB = async (topicId: string, messageIds: string[]): Promise<void> => {
   try {
     await dbService.deleteMessages(topicId, messageIds)
-    logger.silly('Deleted messages via DbService', { topicId, count: messageIds.length })
+    logger.silly('Deleted messages via DbService', {
+      topicId,
+      count: messageIds.length
+    })
   } catch (error) {
     logger.error('Failed to delete messages:', { topicId, messageIds, error })
     throw error
@@ -1964,7 +2070,11 @@ export const saveMessageAndBlocksToDB = async (
       messageIndex
     })
   } catch (error) {
-    logger.error('Failed to save message and blocks:', { topicId, messageId: message.id, error })
+    logger.error('Failed to save message and blocks:', {
+      topicId,
+      messageId: message.id,
+      error
+    })
     throw error
   }
 }

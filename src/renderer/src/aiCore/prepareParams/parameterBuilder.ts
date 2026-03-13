@@ -37,6 +37,7 @@ import type { WebTraceContext } from '@renderer/types/trace'
 import { mapRegexToPatterns } from '@renderer/utils/blacklistMatchPattern'
 import { replacePromptVariables } from '@renderer/utils/prompt'
 import { isAIGatewayProvider, isAwsBedrockProvider, isSupportUrlContextProvider } from '@renderer/utils/provider'
+import { DEFAULT_TIMEOUT } from '@shared/config/constant'
 import type { ModelMessage, Tool } from 'ai'
 import { stepCountIs } from 'ai'
 
@@ -49,7 +50,7 @@ import { getMaxTokens, getTemperature, getTopP } from './modelParameters'
 
 const logger = loggerService.withContext('parameterBuilder')
 
-type ProviderDefinedTool = Extract<Tool<any, any>, { type: 'provider-defined' }>
+type ProviderDefinedTool = Extract<Tool<any, any>, { type: 'provider' }>
 
 function mapVertexAIGatewayModelToProviderId(model: Model): BaseProviderId | undefined {
   if (isAnthropicModel(model)) {
@@ -64,9 +65,7 @@ function mapVertexAIGatewayModelToProviderId(model: Model): BaseProviderId | und
   if (isOpenAIModel(model)) {
     return 'openai'
   }
-  logger.warn(
-    `[mapVertexAIGatewayModelToProviderId] Unknown model type for AI Gateway: ${model.id}. Web search will not be enabled.`
-  )
+  logger.warn(`Unknown model type for AI Gateway: ${model.id}. Web search will not be enabled.`)
   return undefined
 }
 
@@ -80,12 +79,13 @@ export async function buildStreamTextParams(
   provider: Provider,
   options: {
     mcpTools?: MCPTool[]
+    allowedTools?: string[]
     webSearchProviderId?: string
     webSearchConfig?: CherryWebSearchConfig
     requestOptions?: {
       signal?: AbortSignal
       timeout?: number
-      headers?: Record<string, string>
+      headers?: Record<string, string | undefined>
     }
     traceContext?: WebTraceContext
   }
@@ -100,7 +100,15 @@ export async function buildStreamTextParams(
   }
   webSearchPluginConfig?: WebSearchPluginConfig
 }> {
-  const { mcpTools } = options
+  const { mcpTools, requestOptions = {} } = options
+  // No caller currently provides a custom timeout; defaultTimeout (10 min) is the fallback.
+  const { signal: externalSignal, timeout = DEFAULT_TIMEOUT, headers: inputHeaders = {} } = requestOptions
+  const timeoutSignal = AbortSignal.timeout(timeout)
+  const signals = [timeoutSignal]
+  if (externalSignal) {
+    signals.push(externalSignal)
+  }
+  const finalSignal = AbortSignal.any(signals)
 
   const model = assistant.model || getDefaultModel()
   const aiSdkProviderId = getAiSdkProviderId(provider)
@@ -132,7 +140,7 @@ export async function buildStreamTextParams(
 
   const enableGenerateImage = !!(isGenerateImageModel(model) && assistant.enableGenerateImage)
 
-  let tools = setupToolsConfig(mcpTools, options.traceContext)
+  let tools = setupToolsConfig(mcpTools, options.allowedTools, options.traceContext)
 
   // 构建真正的 providerOptions
   const webSearchConfig: CherryWebSearchConfig = {
@@ -198,22 +206,17 @@ export async function buildStreamTextParams(
       case 'anthropic':
       case 'azure-anthropic':
       case 'google-vertex-anthropic':
-        tools.web_fetch = (
-          ['anthropic', 'azure-anthropic'].includes(aiSdkProviderId)
-            ? anthropic.tools.webFetch_20250910({
-                maxUses: webSearchConfig.maxResults,
-                blockedDomains: blockedDomains.length > 0 ? blockedDomains : undefined
-              })
-            : vertexAnthropic.tools.webFetch_20250910({
-                maxUses: webSearchConfig.maxResults,
-                blockedDomains: blockedDomains.length > 0 ? blockedDomains : undefined
-              })
-        ) as ProviderDefinedTool
+        if (['anthropic', 'azure-anthropic'].includes(aiSdkProviderId)) {
+          tools.web_fetch = anthropic.tools.webFetch_20250910({
+            maxUses: webSearchConfig.maxResults,
+            blockedDomains: blockedDomains.length > 0 ? blockedDomains : undefined
+          }) as ProviderDefinedTool
+        }
         break
     }
   }
 
-  let headers: Record<string, string | undefined> = options.requestOptions?.headers ?? {}
+  let headers = inputHeaders
 
   if (isAnthropicModel(model) && !isAwsBedrockProvider(provider)) {
     const betaHeaders = addAnthropicHeaders(assistant, model)
@@ -235,7 +238,7 @@ export async function buildStreamTextParams(
     topP: getTopP(assistant, model),
     // Include AI SDK standard params extracted from custom parameters
     ...standardParams,
-    abortSignal: options.requestOptions?.signal,
+    abortSignal: finalSignal,
     headers,
     providerOptions,
     stopWhen: stepCountIs(20),
@@ -278,6 +281,7 @@ export async function buildGenerateTextParams(
   provider: Provider,
   options: {
     mcpTools?: MCPTool[]
+    allowedTools?: string[]
     enableTools?: boolean
   } = {}
 ): Promise<any> {

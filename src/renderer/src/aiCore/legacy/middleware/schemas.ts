@@ -35,8 +35,6 @@ export interface CompletionsParams {
   assistant: Assistant // 助手为基本单位
   // model: Model
 
-  traceContext?: WebTraceContext
-
   onChunk?: (chunk: Chunk) => void
   onResponse?: (text: string, isComplete: boolean) => void
 
@@ -61,6 +59,7 @@ export interface CompletionsParams {
 
   // 上下文控制
   contextCount?: number
+  traceContext?: WebTraceContext
 
   // abort 控制
   abortKey?: string
