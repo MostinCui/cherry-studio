@@ -380,11 +380,13 @@ class SpanCacheService implements TraceCache {
         }
       }
 
-      return Array.from(parseLines(chunks.join('')))
+      return (
+        Array.from(parseLines(chunks.join('')))
           .filter((span) => span.topicId === topicId && span.traceId === traceId && span.modelName)
           // 兼容历史数据 新数据可以通过 assistantMsgId 判断，可以不用modelName
           .filter((span) => !modelName || span.modelName === modelName)
           .filter((span) => !assistantMsgId || !span.referenceId || span.referenceId === assistantMsgId)
+      )
     } catch (err) {
       logger.error('Error parsing JSON:', err as Error)
       throw err

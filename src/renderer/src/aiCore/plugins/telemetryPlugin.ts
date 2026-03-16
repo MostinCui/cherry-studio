@@ -324,11 +324,7 @@ export function createTelemetryPlugin(config: TelemetryPluginConfig): AiPlugin<S
             providerId: context.providerId
           })
 
-          parentSpan = currentSpan(
-            traceContext.topicId,
-            traceContext.modelName,
-            traceContext.assistantMsgId
-          )
+          parentSpan = currentSpan(traceContext.topicId, traceContext.modelName, traceContext.assistantMsgId)
           if (parentSpan) {
             // 直接使用父 span 的 SpanContext，避免手动拼装字段遗漏
             parentSpanContext = parentSpan.spanContext()
