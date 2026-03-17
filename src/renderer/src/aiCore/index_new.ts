@@ -18,6 +18,7 @@ import { type Assistant, type GenerateImageParams, type Model, type Provider, Sy
 import type { StreamTextParams } from '@renderer/types/aiCoreTypes'
 import type { WebTraceContext } from '@renderer/types/trace'
 import { SUPPORTED_IMAGE_ENDPOINT_LIST } from '@renderer/utils'
+import type { IdleTimeoutHandle } from '@renderer/utils/IdleTimeoutController'
 import { buildClaudeCodeSystemModelMessage } from '@shared/anthropic'
 import { gateway, type LanguageModel, type Provider as AiSdkProvider } from 'ai'
 
@@ -41,6 +42,7 @@ const logger = loggerService.withContext('ModernAiProvider')
 export type ModernAiProviderConfig = AiSdkMiddlewareConfig & {
   assistant: Assistant
   callType: string
+  idleTimeout?: IdleTimeoutHandle
   traceContext?: WebTraceContext
 }
 
@@ -335,7 +337,8 @@ export default class ModernAiProvider {
         config.enableWebSearch,
         undefined,
         undefined,
-        this.config!.providerId
+        this.config!.providerId,
+        config.idleTimeout
       )
 
       const streamResult = await executor.streamText({
